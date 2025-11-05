@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generative Grid Art</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+            font-family: sans-serif;
+            flex-direction: column; 
+        }
+        canvas {
+            border: 1px solid #ccc;
+            background-color: #fff;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+        #controls {
+            display: none; 
+        }
+    </style>
+</head>
+<body>
+    <canvas id="artCanvas"></canvas>
+    <div id="controls"></div>
+
+    <script>
+        // ====================================================================
+        // 1. 캔버스 및 상수 설정
+        // ====================================================================
+        const canvas = document.getElementById('artCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const COLS = 3;
+        const ROWS = 4; 
+        const GAP = 10; 
+
+        // 셀의 기본 너비와 높이 계산
+        const maxCellW = (400 - (COLS + 1) * GAP) / COLS; 
+        const maxCellH = (600 - (ROWS + 1) * GAP) / ROWS; 
+        const CELL_BASE_DIM = Math.min(maxCellW, maxCellH); 
+
+        const CELL_BASE_W = CELL_BASE_DIM;
+        const CELL_BASE_H = CELL_BASE_DIM; 
+
+        // 캔버스 너비와 높이를 격자 크기에 정확히 맞춥니다.
+        const CANVAS_WIDTH = COLS * CELL_BASE_W + (COLS + 1) * GAP; 
+        const CANVAS_HEIGHT = ROWS * CELL_BASE_H + (ROWS + 1) * GAP; 
+
+        canvas.width = CANVAS_WIDTH;
+        canvas.height = CANVAS_HEIGHT;
+
+        const BALL_R_UNIT = CELL_BASE_DIM / 2;
+
+        const CURVE_FACTOR_VALUES = [0, 1, 2]; 
+
+        // ====================================================================
+        // 2. 데이터 구조 정의
+        // ====================================================================
+
+        class GridCell {
+            constructor(row, col) {
+                this.row = row;
+                this.col = col;
+                this.r = [0, 0, 0, 0]; 
+                this.color = '#000'; 
+                this.merged = null; 
+                this.isMaster = true; 
+                
+                this.x = col * (CELL_BASE_W + GAP) + GAP;
+                this.y = row * (CELL_BASE_H + GAP) + GAP;
+                this.w = CELL_BASE_W;
+                this.h = CELL_BASE_H;
+            }
+        }
+
+        class Ball {
+            constructor(x, y, radius, color = 'black', borderColor = 'transparent') {
+                this.x = x;
+                this.y = y;
+                this.radius = radius;
+                this.color = color; 
+                this.borderColor = borderColor; 
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+
+                if (this.color !== 'transparent' && this.color !== 'rgba(0, 0, 0, 0)') {
+                    ctx.fillStyle = this.color;
+                    ctx.fill();
+                }
+                
+                if (this.borderColor !== 'transparent' && this.borderColor !== 'rgba(0, 0, 0, 0)') {
+                    ctx.lineWidth = 3; 
+                    ctx.strokeStyle = this.borderColor;
+                    ctx.stroke(); 
+                }
+            }
+        }
+
+        // ====================================================================
+        // 3. 상태 변수
+        // ====================================================================
+
+        let grid = [];
+        let staticBalls = [];
+        let controlledBall = null; 
+
+        let focusCol = 0; 
+        let focusRow = 0; 
+        let initialMoveDone = false; 
+        let activeCellIndex = -1; 
+        let activeCornerIndex = 0; 
+
+        let isMergeMode = false; 
+        let mergeTargetIndices = new Set(); 
+
+        let isBallControlMode = false; 
+
+        let keyBuffer = ''; 
+        const MERGE_KEYWORD = 'add'; 
+
+        // ====================================================================
+        // 4. 초기화 및 유틸리티 함수
+        // ====================================================================
+
+        function getRandomColor() {
+            const letters = '0123456789ABCDEF';
+            let color = '#';
+            for (let i = 0; i < 6; i++) {
+                color += letters[Math.floor(Math.random() * 16)];
+            }
+            return color;
+        }
+
+        function initGrid() {
+            grid = [];
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    grid.push(new GridCell(r, c));
+                }
+            }
+            focusCol = 0;
+            focusRow = 0;
+            initialMoveDone = false; 
+            activeCellIndex = -1;
+            activeCornerIndex = 0;
+            isMergeMode = false;
+            mergeTargetIndices.clear();
+            controlledBall = null;
+            staticBalls = [];
+            keyBuffer = '';
+        }
+
+        function getIndex(r, c) {
+            if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return -1;
+            return r * COLS + c;
+        }
+
+        function updateMasterCellGeometry(masterIndex) {
+            const masterCell = grid[masterIndex];
+            if (masterCell.merged === null) return;
+
+            const mergedCells = grid.filter(c => c.merged === masterCell.merged);
+            if (mergedCells.length < 1) return;
+
+            const minR = Math.min(...mergedCells.map(c => c.row));
+            const maxR = Math.max(...mergedCells.map(c => c.row));
+            const minC = Math.min(...mergedCells.map(c => c.col));
+            const maxC = Math.max(...mergedCells.map(c => c.col));
+
+            masterCell.x = minC * (CELL_BASE_W + GAP) + GAP;
+            masterCell.y = minR * (CELL_BASE_H + GAP) + GAP;
+            masterCell.w = (maxC - minC + 1) * CELL_BASE_W + (maxC - minC) * GAP;
+            masterCell.h = (maxR - minR + 1) * CELL_BASE_H + (maxR - minR) * GAP;
+        }
+
+
+        function performMerge(masterIndex, targetIndices) {
+            const masterCell = grid[masterIndex];
+            const cellsToMerge = Array.from(targetIndices).filter(index => {
+                const cell = grid[index];
+                const currentMaster = cell.merged !== null ? cell.merged : index;
+                const masterMergedId = masterCell.merged !== null ? masterCell.merged : masterIndex;
+                return currentMaster !== masterMergedId;
+            });
+
+            if (cellsToMerge.length === 0) {
+                isMergeMode = false;
+                mergeTargetIndices.clear();
+                return;
+            }
+            
+            let masterMergedId = masterCell.merged !== null ? masterCell.merged : masterIndex;
+            if (masterCell.merged === null) {
+                masterCell.merged = masterIndex;
+                masterMergedId = masterIndex;
+            }
+
+            cellsToMerge.forEach(targetIndex => {
+                const targetCell = grid[targetIndex];
+                const oldMergedId = targetCell.merged;
+
+                if (oldMergedId !== null && oldMergedId !== masterMergedId) {
+                    grid.filter(c => c.merged === oldMergedId).forEach(c => c.merged = masterMergedId);
+                }
+                
+                targetCell.merged = masterMergedId;
+                targetCell.isMaster = false;
+            });
+            
+            masterCell.isMaster = true;
+            updateMasterCellGeometry(masterMergedId);
+            
+            isMergeMode = false;
+            mergeTargetIndices.clear();
+        }
+
+        function isAdjacentToMasterGroup(masterIndex, targetIndex) {
+            if (masterIndex === -1 || targetIndex === -1) return false;
+            
+            const masterCell = grid[masterIndex];
+            const targetCell = grid[targetIndex];
+
+            const targetR = targetCell.row;
+            const targetC = targetCell.col;
+            
+            const masterMergedId = masterCell.merged !== null ? masterCell.merged : masterIndex;
+            const masterCells = grid.filter(c => c.merged === masterMergedId);
+            
+            if (masterCells.length === 0 && masterCell.merged === null) {
+                masterCells.push(masterCell);
+            }
+            
+            for (const cell of masterCells) {
+                const r = cell.row;
+                const c = cell.col;
+                
+                if (Math.abs(targetR - r) + Math.abs(targetC - c) === 1) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        function deactivateCell(index) {
+            if (index !== -1) {
+                grid[index].color = '#000';
+            }
+            activeCellIndex = -1;
+            isMergeMode = false; 
+            mergeTargetIndices.clear(); 
+        }
+        
+        function saveCanvasAsImage() {
+            const dataURL = canvas.toDataURL('image/png');
+            
+            const a = document.createElement('a');
+            a.href = dataURL;
+            
+            const now = new Date();
+            const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
+            a.download = `grid_art_${timestamp}.png`;
+            
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            console.log(`Image saved as grid_art_${timestamp}.png`);
+        }
+        
+        // ====================================================================
+        // 5. 드로잉 함수
+        // ====================================================================
+        
+        function drawGridCell(cell, isFocused, isActive, isMergeTarget) {
+            if (cell.merged !== null && !cell.isMaster) {
+                return;
+            }
+            
+            const startX = cell.x;
+            const startY = cell.y;
+            const width = cell.w;
+            const height = cell.h;
+
+            const maxDimension = Math.min(width, height); 
+            
+            const factorTL = CURVE_FACTOR_VALUES[cell.r[0]];
+            const factorTR = CURVE_FACTOR_VALUES[cell.r[1]];
+            const factorBR = CURVE_FACTOR_VALUES[cell.r[2]];
+            const factorBL = CURVE_FACTOR_VALUES[cell.r[3]];
+
+            const rTL_raw = factorTL * (maxDimension / 2); 
+            const rTR_raw = factorTR * (maxDimension / 2);
+            const rBR_raw = factorBR * (maxDimension / 2);
+            const rBL_raw = factorBL * (maxDimension / 2);
+            
+            const adj_r_tl = Math.min(rTL_raw, width * 2, height * 2); 
+            const adj_r_tr = Math.min(rTR_raw, width * 2, height * 2);
+            const adj_r_br = Math.min(rBR_raw, width * 2, height * 2);
+            const adj_r_bl = Math.min(rBL_raw, width * 2, height * 2);
+
+
+            ctx.beginPath();
+            
+            ctx.moveTo(startX + adj_r_tl, startY);
+            ctx.lineTo(startX + width - adj_r_tr, startY);
+            ctx.arcTo(startX + width, startY, startX + width, startY + adj_r_tr, adj_r_tr);
+
+            ctx.lineTo(startX + width, startY + height - adj_r_br);
+            ctx.arcTo(startX + width, startY + height, startX + width - adj_r_br, startY + height, adj_r_br);
+
+            ctx.lineTo(startX + adj_r_bl, startY + height);
+            ctx.arcTo(startX, startY + height, startX, startY + height - adj_r_bl, adj_r_bl);
+
+            ctx.lineTo(startX, startY + adj_r_tl);
+            ctx.arcTo(startX, startY, startX + adj_r_tl, startY, adj_r_tl);
+            ctx.closePath();
+
+            ctx.fillStyle = cell.color;
+            ctx.fill();
+
+            // 테두리 드로잉 
+            if (isFocused || isActive || isMergeTarget) {
+                if (isActive || isMergeTarget) { 
+                    // 활성화/합치기 모드: 진한 주황색 (Orange Red)
+                    ctx.strokeStyle = '#FF8C00'; 
+                    ctx.lineWidth = 5; 
+                } 
+                else if (isFocused) {
+                    // **[수정]** 포커스 테두리: 오렌지색
+                    ctx.strokeStyle = '#FFA500'; 
+                    ctx.lineWidth = 3; 
+                }
+
+                ctx.stroke();
+
+                if (isActive) {
+                    ctx.fillStyle = '#e74c3c'; 
+                    const markers = [
+                        { x: startX, y: startY },                 
+                        { x: startX + width, y: startY },         
+                        { x: startX + width, y: startY + height }, 
+                        { x: startX, y: startY + height }          
+                    ];
+                    
+                    const marker = markers[activeCornerIndex];
+                    ctx.beginPath();
+                    ctx.arc(marker.x, marker.y, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            } else {
+                ctx.strokeStyle = '#ddd'; 
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            const focusIndex = getIndex(focusRow, focusCol);
+            
+            grid.forEach(cell => {
+                cell.isPseudoFocused = false;
+                cell.isPseudoActive = false;
+            });
+
+            grid.forEach((cell, index) => {
+                const isFocused = index === focusIndex;
+                
+                if (cell.merged !== null) {
+                    const masterIndex = cell.merged;
+                    if (index !== masterIndex && index === focusIndex) {
+                        grid[masterIndex].isPseudoFocused = true;
+                    }
+                    if (index !== masterIndex && index === activeCellIndex) {
+                        grid[masterIndex].isPseudoActive = true;
+                    }
+                }
+            });
+            
+            grid.forEach((cell, index) => {
+                let isFocused = initialMoveDone ? (index === focusIndex || cell.isPseudoFocused) : false;
+                let isActive = index === activeCellIndex || cell.isPseudoActive;
+                
+                let isMergeTarget = isMergeMode && mergeTargetIndices.has(index);
+
+                if (isMergeTarget) {
+                    isActive = false; 
+                }
+                
+                if (index === activeCellIndex) {
+                    isActive = true; 
+                }
+
+                drawGridCell(cell, isFocused, isActive, isMergeTarget);
+            });
+
+            staticBalls.forEach(ball => ball.draw());
+
+            if (controlledBall) {
+                controlledBall.draw();
+            }
+            
+            requestAnimationFrame(draw);
+        }
+
+        // ====================================================================
+        // 6. 키보드 이벤트 핸들러
+        // ====================================================================
+
+        document.addEventListener('keydown', (e) => {
+            const key = e.key.toLowerCase();
+            
+            // S 키: 저장 기능
+            if (key === 's') {
+                e.preventDefault();
+                saveCanvasAsImage();
+                return;
+            }
+
+            // ESC 키: 공 제어 중이면 공 제거, 아니면 전체 초기화
+            if (key === 'escape') { 
+                if (controlledBall) {
+                    controlledBall = null; 
+                    isBallControlMode = false;
+                    return;
+                }
+                initGrid(); 
+                return; 
+            }
+            
+            // B 키: 공 생성/제어 모드 진입 (공은 딱 하나만 만들어짐)
+            if (key === 'b') { 
+                e.preventDefault();
+                
+                if (controlledBall === null) { 
+                    const x = CANVAS_WIDTH / 2; 
+                    const y = CANVAS_HEIGHT / 2;
+                    controlledBall = new Ball(x, y, BALL_R_UNIT, getRandomColor(), 'transparent'); 
+                    isBallControlMode = true; 
+                } else if (!isBallControlMode) {
+                    isBallControlMode = true; 
+                }
+                
+                isMergeMode = false; 
+                mergeTargetIndices.clear();
+                keyBuffer = ''; 
+                return;
+            }
+
+            // ----------------------------------------------------------------
+            // 공 제어 모드 로직 (controlledBall이 존재할 때)
+            // ----------------------------------------------------------------
+            if (controlledBall && isBallControlMode) {
+                e.preventDefault(); 
+                const moveStep = 10;
+                const ballR = controlledBall.radius;
+
+                // 방향키: 공 이동
+                if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+                    switch (key) {
+                        case 'arrowup': controlledBall.y = Math.max(ballR, controlledBall.y - moveStep); break;
+                        case 'arrowdown': controlledBall.y = Math.min(CANVAS_HEIGHT - ballR, controlledBall.y + moveStep); break;
+                        case 'arrowleft': controlledBall.x = Math.max(ballR, controlledBall.x - moveStep); break;
+                        case 'arrowright': controlledBall.x = Math.min(CANVAS_WIDTH - ballR, controlledBall.x + moveStep); break;
+                    }
+                    return;
+                }
+
+                switch (key) {
+                    case 'enter': 
+                        staticBalls.push(controlledBall);
+                        controlledBall = null; 
+                        isBallControlMode = false;
+                        break;
+                        
+                    default:
+                        break;
+                }
+                return; 
+            }
+            // ----------------------------------------------------------------
+            // 격자 제어 로직 (이전과 동일)
+            // ----------------------------------------------------------------
+            
+            if (key.match(/^[a-z0-9]$/)) {
+                keyBuffer += key;
+                if (keyBuffer.length > MERGE_KEYWORD.length) {
+                    keyBuffer = keyBuffer.slice(-MERGE_KEYWORD.length);
+                }
+                
+                if (keyBuffer === MERGE_KEYWORD && !isMergeMode) {
+                    e.preventDefault(); 
+                    const focusIndex = getIndex(focusRow, focusCol);
+                    
+                    let masterIndex = focusIndex;
+                    if (grid[focusIndex].merged !== null) {
+                        masterIndex = grid[focusIndex].merged;
+                    }
+                    
+                    deactivateCell(activeCellIndex);
+                    
+                    activeCellIndex = masterIndex;
+                    grid[masterIndex].color = '#FF8C00'; 
+                    isMergeMode = true;
+                    mergeTargetIndices.clear(); 
+                    keyBuffer = ''; 
+                    initialMoveDone = true; 
+                    return; 
+                }
+            } else if ([' ', 'enter', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', '1', '2', '3', '4', 'r'].includes(key)) {
+                keyBuffer = ''; 
+            }
+
+            if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+                e.preventDefault(); 
+                
+                if (!isMergeMode && activeCellIndex !== -1) {
+                    deactivateCell(activeCellIndex);
+                }
+
+                const oldCol = focusCol;
+                const oldRow = focusRow;
+                
+                let newRow = focusRow;
+                let newCol = focusCol;
+
+                switch (key) {
+                    case 'arrowup': newRow = Math.max(0, focusRow - 1); break;
+                    case 'arrowdown': newRow = Math.min(ROWS - 1, focusRow + 1); break;
+                    case 'arrowleft': newCol = Math.max(0, focusCol - 1); break;
+                    case 'arrowright': newCol = Math.min(COLS - 1, focusCol + 1); break;
+                }
+                
+                const focusIndexNew = getIndex(newRow, newCol);
+                let moved = (oldCol !== newCol || oldRow !== newRow);
+
+                if (isMergeMode && activeCellIndex !== -1 && moved) {
+                    const isMaster = focusIndexNew === activeCellIndex;
+                    const isAdjacent = isAdjacentToMasterGroup(activeCellIndex, focusIndexNew);
+                    
+                    if (!isAdjacent && !isMaster) {
+                         moved = false;
+                    } 
+                    
+                    if (moved && isAdjacent && !isMaster) {
+                        const targetMergedId = grid[focusIndexNew].merged;
+                        const masterMergedId = grid[activeCellIndex].merged !== null ? grid[activeCellIndex].merged : activeCellIndex;
+                        
+                        if (targetMergedId !== masterMergedId) {
+                             mergeTargetIndices.add(focusIndexNew);
+                        }
+                    }
+                }
+                
+                if (moved) {
+                    focusCol = newCol;
+                    focusRow = newRow;
+                    initialMoveDone = true; 
+                }
+                return;
+            }
+
+            if (key === ' ') {
+                e.preventDefault();
+                const focusIndex = getIndex(focusRow, focusCol);
+                
+                let targetIndex = focusIndex;
+                if (grid[focusIndex].merged !== null && !grid[focusIndex].isMaster) {
+                    targetIndex = grid[focusIndex].merged;
+                }
+
+                if (activeCellIndex === targetIndex) {
+                    deactivateCell(targetIndex);
+                } else {
+                    deactivateCell(activeCellIndex);
+                    
+                    activeCellIndex = targetIndex; 
+                    initialMoveDone = true; 
+                    grid[targetIndex].color = '#FF8C00'; 
+                }
+                return;
+            }
+
+            if (activeCellIndex === -1) {
+                return;
+            }
+
+            if (key === 'enter') {
+                if (isMergeMode && activeCellIndex !== -1 && mergeTargetIndices.size > 0) {
+                    e.preventDefault();
+                    performMerge(activeCellIndex, mergeTargetIndices);
+                } else if (isMergeMode) {
+                     isMergeMode = false;
+                }
+                return;
+            }
+            
+            const activeCell = grid[activeCellIndex];
+
+            if (isMergeMode) {
+                return;
+            }
+
+            const cornerMap = { '1': 0, '2': 1, '3': 2, '4': 3 };
+            if (key in cornerMap) {
+                activeCornerIndex = cornerMap[key];
+                return;
+            }
+
+            if (key === 'r') {
+                const currentCurveIndex = activeCell.r[activeCornerIndex];
+                const nextIndex = (currentCurveIndex + 1) % CURVE_FACTOR_VALUES.length;
+                activeCell.r[activeCornerIndex] = nextIndex;
+                return;
+            }
+        });
+
+        // ====================================================================
+        // 7. 실행
+        // ====================================================================
+
+        initGrid();
+        requestAnimationFrame(draw);
+    </script>
+</body>
+</html>
